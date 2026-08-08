@@ -1483,3 +1483,775 @@ Pass
 
 This is a fundamental **Shift Left Security** pattern and will later be integrated into the complete CI/CD pipeline.
 
+# DevSecOps Lab 03 — Software Composition Analysis with Trivy
+
+## Objective
+
+This lab introduces **Software Composition Analysis (SCA)** using Trivy.
+
+The goal is to identify known vulnerabilities in third-party dependencies before an application progresses further through the software delivery lifecycle.
+
+By the end of this lab, you will be able to:
+
+* Explain the purpose of Software Composition Analysis.
+* Understand the difference between SAST and SCA.
+* Scan Python dependencies using Trivy.
+* Interpret CVE findings.
+* Understand installed and fixed package versions.
+* Filter vulnerabilities by severity.
+* Use Trivy exit codes as CI/CD security gates.
+* Upgrade a vulnerable dependency and verify the remediation.
+* Understand direct and transitive dependencies.
+
+---
+
+## Tools Used
+
+* Ubuntu VM
+* Docker
+* Trivy
+* Python `requirements.txt`
+
+---
+
+## SAST vs SCA
+
+SAST analyzes the application's source code:
+
+```text
+Source Code
+    |
+    v
+SAST Scanner
+    |
+    v
+Unsafe Code Patterns
+```
+
+SCA analyzes third-party dependencies:
+
+```text
+Dependency Manifest
+       |
+       v
+   SCA Scanner
+       |
+       v
+Known Vulnerability Database
+       |
+       v
+      CVEs
+```
+
+Both controls are required because secure application code can still depend on vulnerable third-party components.
+
+---
+
+# Lab Architecture
+
+```text
+requirements.txt
+      |
+      v
+    Trivy
+      |
+      v
+Vulnerability Database
+      |
+      v
+Known CVEs
+      |
+      v
+Security Policy
+   /       \
+ Pass      Fail
+```
+
+---
+
+# Lab Directory
+
+```text
+devsecops-labs/
+└── 03-sca-trivy/
+    └── requirements.txt
+```
+
+---
+
+# 1. Create the Lab Environment
+
+```bash
+mkdir -p ~/devsecops-labs/03-sca-trivy
+cd ~/devsecops-labs/03-sca-trivy
+```
+
+Verify the current location:
+
+```bash
+pwd
+```
+
+---
+
+# 2. Install Trivy with Docker
+
+Pull the Trivy container image:
+
+```bash
+docker pull aquasec/trivy:latest
+```
+
+Verify Trivy:
+
+```bash
+docker run --rm \
+  aquasec/trivy:latest \
+  version
+```
+
+Create a persistent Trivy cache directory:
+
+```bash
+mkdir -p "$HOME/.cache/trivy"
+```
+
+The persistent cache prevents Trivy from unnecessarily downloading its vulnerability database from scratch for every container execution.
+
+---
+
+# 3. Create an Intentionally Outdated Dependency
+
+Create `requirements.txt`:
+
+```bash
+cat > requirements.txt <<'EOF'
+requests==2.25.0
+EOF
+```
+
+Inspect the file:
+
+```bash
+cat requirements.txt
+```
+
+Expected content:
+
+```text
+requests==2.25.0
+```
+
+This old package version is intentionally used to demonstrate dependency vulnerability detection.
+
+---
+
+# 4. Run the Initial Vulnerability Scan
+
+Run Trivy against the project filesystem:
+
+```bash
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  /src
+```
+
+During the first execution, Trivy may download or update its vulnerability database.
+
+Trivy analyzes supported dependency manifests such as `requirements.txt` and compares identified package versions against known vulnerability information.
+
+---
+
+# 5. Interpret Trivy Findings
+
+A vulnerability report can contain fields such as:
+
+```text
+Library
+Vulnerability
+Severity
+Installed Version
+Fixed Version
+Title
+```
+
+For example:
+
+```text
+Package
+   |
+   +-- Installed Version
+   |
+   +-- CVE
+   |
+   +-- Severity
+   |
+   +-- Fixed Version
+```
+
+Important fields include:
+
+### Library
+
+The affected third-party component.
+
+### Vulnerability
+
+The vulnerability identifier, commonly a CVE.
+
+### Severity
+
+Typical severity levels are:
+
+```text
+UNKNOWN
+LOW
+MEDIUM
+HIGH
+CRITICAL
+```
+
+### Installed Version
+
+The package version currently declared by the application.
+
+### Fixed Version
+
+A version in which the vulnerability has been addressed.
+
+The exact CVEs and severity classifications may change over time as vulnerability databases are updated.
+
+---
+
+# 6. Filter Findings by Severity
+
+Display only `MEDIUM`, `HIGH`, and `CRITICAL` findings:
+
+```bash
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity MEDIUM,HIGH,CRITICAL \
+  /src
+```
+
+Severity filtering allows engineering teams to implement organization-specific vulnerability policies.
+
+---
+
+# 7. Inspect the Default Exit Code
+
+Run the vulnerability scan:
+
+```bash
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity MEDIUM,HIGH,CRITICAL \
+  /src
+```
+
+Immediately inspect the exit code:
+
+```bash
+echo $?
+```
+
+By default, Trivy can complete successfully with exit code `0` while still reporting security findings.
+
+This behavior allows users to separate vulnerability reporting from pipeline enforcement.
+
+---
+
+# 8. Configure a CI/CD Security Gate
+
+Configure Trivy to return exit code `1` when matching vulnerabilities are detected:
+
+```bash
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity MEDIUM,HIGH,CRITICAL \
+  --exit-code 1 \
+  /src
+```
+
+Inspect the exit code:
+
+```bash
+echo $?
+```
+
+If a matching vulnerability is detected, the expected result is:
+
+```text
+1
+```
+
+This creates a basic security gate:
+
+```text
+Trivy
+  |
+  v
+Vulnerabilities?
+ /           \
+No           Yes
+|             |
+0             1
+|             |
+v             v
+PASS         FAIL
+```
+
+---
+
+# 9. Example Production Severity Policy
+
+A real organization may choose a policy such as:
+
+```text
+LOW       -> Report
+MEDIUM    -> Report / Create Ticket
+HIGH      -> Block
+CRITICAL  -> Block
+```
+
+A corresponding scan could be:
+
+```bash
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity HIGH,CRITICAL \
+  --exit-code 1 \
+  /src
+```
+
+The security scanner identifies findings, while the organization's security policy determines which findings block delivery.
+
+---
+
+# 10. Upgrade the Dependency
+
+Replace the outdated package version:
+
+```bash
+cat > requirements.txt <<'EOF'
+requests==2.34.2
+EOF
+```
+
+Inspect the updated manifest:
+
+```bash
+cat requirements.txt
+```
+
+Expected content:
+
+```text
+requests==2.34.2
+```
+
+---
+
+# 11. Re-scan After Remediation
+
+Run the security gate again:
+
+```bash
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity MEDIUM,HIGH,CRITICAL \
+  --exit-code 1 \
+  /src
+```
+
+Check the exit code:
+
+```bash
+echo $?
+```
+
+If no vulnerabilities matching the configured policy remain, the expected result is:
+
+```text
+0
+```
+
+The remediation workflow is therefore:
+
+```text
+Detect
+  |
+  v
+Identify Vulnerable Dependency
+  |
+  v
+Review CVE
+  |
+  v
+Identify Fixed Version
+  |
+  v
+Upgrade
+  |
+  v
+Re-scan
+  |
+  v
+Pass
+```
+
+---
+
+# Direct vs Transitive Dependencies
+
+A dependency declared directly by the application is a **direct dependency**.
+
+For example:
+
+```text
+Application
+    |
+    v
+requests
+```
+
+However, that dependency may depend on additional packages:
+
+```text
+Application
+    |
+    v
+requests
+    |
+    +--> urllib3
+    |
+    +--> certifi
+    |
+    +--> idna
+    |
+    +--> charset-normalizer
+```
+
+These secondary packages are **transitive dependencies**.
+
+A vulnerability may therefore exist several levels below the application's direct dependencies:
+
+```text
+Application
+      |
+      v
+Direct Dependency
+      |
+      v
+Transitive Dependency
+      |
+      v
+Known Vulnerability
+```
+
+A simple `requirements.txt` frequently contains only direct dependencies.
+
+For more complete Python dependency scanning, teams commonly generate fully resolved dependency information using mechanisms such as lock files, `pip freeze`, or dependency-management tooling.
+
+---
+
+# Continuous SCA
+
+A clean scan does not mean that a dependency will remain safe forever.
+
+```text
+Package Safe Today
+       |
+       v
+New Vulnerability Disclosed
+       |
+       v
+New CVE
+       |
+       v
+Package Becomes a Finding
+```
+
+For this reason, SCA should be executed continuously as part of CI/CD rather than treated as a one-time audit.
+
+---
+
+# DevSecOps Pipeline Progress
+
+After completing this lab, the security workflow contains three layers:
+
+```text
+Source Code
+    |
+    v
+Gitleaks
+Secrets Detection
+    |
+    v
+Semgrep
+SAST
+    |
+    v
+Trivy
+SCA
+    |
+    v
+Docker Build
+```
+
+Each layer answers a different security question:
+
+```text
+Gitleaks
+   |
+   +--> Did we expose credentials?
+
+Semgrep
+   |
+   +--> Did we write insecure code?
+
+Trivy SCA
+   |
+   +--> Are our dependencies known to be vulnerable?
+```
+
+---
+
+# Complete Lab Command Reference
+
+```bash
+# ==========================================
+# DevSecOps Lab 03 - SCA with Trivy
+# ==========================================
+
+
+# ------------------------------------------
+# 1. Create Lab Environment
+# ------------------------------------------
+
+mkdir -p ~/devsecops-labs/03-sca-trivy
+
+cd ~/devsecops-labs/03-sca-trivy
+
+pwd
+
+
+# ------------------------------------------
+# 2. Download Trivy
+# ------------------------------------------
+
+docker pull aquasec/trivy:latest
+
+
+# ------------------------------------------
+# 3. Verify Trivy
+# ------------------------------------------
+
+docker run --rm \
+  aquasec/trivy:latest \
+  version
+
+
+# ------------------------------------------
+# 4. Create Persistent Trivy Cache
+# ------------------------------------------
+
+mkdir -p "$HOME/.cache/trivy"
+
+
+# ------------------------------------------
+# 5. Create Vulnerable Dependency Manifest
+# ------------------------------------------
+
+cat > requirements.txt <<'EOF'
+requests==2.25.0
+EOF
+
+
+# ------------------------------------------
+# 6. Inspect Dependency Manifest
+# ------------------------------------------
+
+cat requirements.txt
+
+
+# ------------------------------------------
+# 7. Run Initial SCA Scan
+# ------------------------------------------
+
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  /src
+
+
+# ------------------------------------------
+# 8. Filter by Severity
+# ------------------------------------------
+
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity MEDIUM,HIGH,CRITICAL \
+  /src
+
+
+# ------------------------------------------
+# 9. Check Default Exit Code
+# ------------------------------------------
+
+echo $?
+
+
+# ------------------------------------------
+# 10. Run Trivy as a Security Gate
+# ------------------------------------------
+
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity MEDIUM,HIGH,CRITICAL \
+  --exit-code 1 \
+  /src
+
+
+# ------------------------------------------
+# 11. Check Security Gate Exit Code
+# ------------------------------------------
+
+echo $?
+
+
+# ------------------------------------------
+# 12. Example HIGH/CRITICAL Production Gate
+# ------------------------------------------
+
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity HIGH,CRITICAL \
+  --exit-code 1 \
+  /src
+
+
+# ------------------------------------------
+# 13. Upgrade the Vulnerable Dependency
+# ------------------------------------------
+
+cat > requirements.txt <<'EOF'
+requests==2.34.2
+EOF
+
+
+# ------------------------------------------
+# 14. Inspect the Updated Dependency
+# ------------------------------------------
+
+cat requirements.txt
+
+
+# ------------------------------------------
+# 15. Re-scan After Remediation
+# ------------------------------------------
+
+docker run --rm \
+  -v "$PWD:/src:ro" \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  fs \
+  --scanners vuln \
+  --severity MEDIUM,HIGH,CRITICAL \
+  --exit-code 1 \
+  /src
+
+
+# ------------------------------------------
+# 16. Verify Final Exit Code
+# ------------------------------------------
+
+echo $?
+```
+
+---
+
+# Lab Summary
+
+In this lab, you:
+
+1. Installed Trivy using Docker.
+2. Created an intentionally outdated Python dependency.
+3. Scanned `requirements.txt` for known vulnerabilities.
+4. Learned how to interpret CVEs.
+5. Examined installed and fixed versions.
+6. Filtered vulnerabilities by severity.
+7. Examined Trivy's default exit-code behavior.
+8. Created a CI/CD security gate using `--exit-code`.
+9. Upgraded the vulnerable dependency.
+10. Re-scanned the project.
+11. Learned the difference between direct and transitive dependencies.
+
+The core SCA workflow is:
+
+```text
+Dependency Manifest
+       |
+       v
+      SCA
+       |
+       v
+Known Vulnerability
+       |
+       v
+     CVE
+       |
+       v
+Fixed Version
+       |
+       v
+   Upgrade
+       |
+       v
+    Re-scan
+```
+
+This adds the third major security control to the DevSecOps pipeline:
+
+```text
+Secrets Detection → SAST → SCA
+```
