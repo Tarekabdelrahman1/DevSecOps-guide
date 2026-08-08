@@ -3422,3 +3422,1142 @@ Trivy Image
    v
 Container Security
 ```
+
+
+
+
+# DevSecOps Lab 05 — DAST with OWASP ZAP
+
+## Objective
+
+This lab introduces **Dynamic Application Security Testing (DAST)** using OWASP ZAP.
+
+Unlike SAST, which analyzes source code, DAST evaluates a running application through its externally exposed HTTP interface.
+
+The lab uses **OWASP Juice Shop**, an intentionally vulnerable web application designed for security education and security-tool testing.
+
+By the end of this lab, you will be able to:
+
+* Explain the difference between SAST and DAST.
+* Run OWASP Juice Shop using Docker.
+* Create a dedicated Docker network for security testing.
+* Run OWASP ZAP using Docker.
+* Perform a ZAP Baseline Scan.
+* Understand passive scanning.
+* Generate HTML and JSON security reports.
+* Interpret ZAP alerts and exit codes.
+* Understand security policy versus scanner findings.
+* Perform a controlled ZAP Active Scan against an authorized local target.
+* Understand common DAST coverage limitations.
+
+---
+
+## Tools Used
+
+* Ubuntu VM
+* Docker
+* OWASP Juice Shop
+* OWASP ZAP
+
+---
+
+# SAST vs DAST
+
+SAST analyzes application source code:
+
+```text
+Source Code
+    |
+    v
+SAST Scanner
+    |
+    v
+Potential Vulnerability
+```
+
+The application does not need to be running.
+
+DAST analyzes a running application:
+
+```text
+DAST Scanner
+     |
+     v
+HTTP Requests
+     |
+     v
+Running Application
+     |
+     v
+HTTP Responses
+     |
+     v
+Security Analysis
+```
+
+A useful mental model is:
+
+```text
+SAST -> Inside-out
+DAST -> Outside-in
+```
+
+---
+
+# Lab Architecture
+
+Both containers are connected to the same dedicated Docker network:
+
+```text
+                 Docker Network: zapnet
+
+        +-------------------------+
+        |                         |
+        |   OWASP Juice Shop      |
+        |                         |
+        |      Port 3000          |
+        |                         |
+        +------------+------------+
+                     ^
+                     |
+                     | HTTP
+                     |
+        +------------+------------+
+        |                         |
+        |       OWASP ZAP         |
+        |                         |
+        |      DAST Scanner       |
+        |                         |
+        +-------------------------+
+```
+
+---
+
+# 1. Create the Lab Environment
+
+```bash
+mkdir -p ~/devsecops-labs/05-dast-zap
+
+cd ~/devsecops-labs/05-dast-zap
+
+pwd
+```
+
+---
+
+# 2. Create the Docker Security-Test Network
+
+Create the network if it does not already exist:
+
+```bash
+docker network inspect zapnet >/dev/null 2>&1 || \
+docker network create zapnet
+```
+
+Verify it:
+
+```bash
+docker network ls
+```
+
+A shared Docker network allows the ZAP container to reach the target container using Docker DNS and the target container name.
+
+---
+
+# 3. Download OWASP Juice Shop
+
+```bash
+docker pull bkimminich/juice-shop
+```
+
+---
+
+# 4. Start OWASP Juice Shop
+
+```bash
+docker run -d \
+  --rm \
+  --name juice-shop \
+  --network zapnet \
+  -p 3000:3000 \
+  bkimminich/juice-shop
+```
+
+Verify that the container is running:
+
+```bash
+docker ps
+```
+
+Inspect recent application logs:
+
+```bash
+docker logs --tail 20 juice-shop
+```
+
+---
+
+# 5. Verify the Target Application
+
+From the Ubuntu host:
+
+```bash
+curl -I http://localhost:3000
+```
+
+The application can also be accessed in a browser at:
+
+```text
+http://localhost:3000
+```
+
+The DAST scanner requires a reachable running application.
+
+---
+
+# 6. Download OWASP ZAP
+
+```bash
+docker pull ghcr.io/zaproxy/zaproxy:stable
+```
+
+Verify ZAP:
+
+```bash
+docker run --rm \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap.sh -version
+```
+
+---
+
+# ZAP Scan Types
+
+ZAP provides several packaged Docker scans.
+
+```text
+Baseline Scan
+    |
+    +-- Spider
+    |
+    +-- Passive Scan
+
+
+Full Scan
+    |
+    +-- Spider
+    |
+    +-- Passive Scan
+    |
+    +-- Active Scan
+
+
+API Scan
+    |
+    +-- OpenAPI
+    +-- SOAP
+    +-- GraphQL
+```
+
+The Baseline Scan is the appropriate starting point because it performs discovery and passive analysis without running a full active attack against the application.
+
+---
+
+# 7. Run the ZAP Baseline Scan
+
+```bash
+docker run --rm \
+  --network zapnet \
+  -v "$PWD:/zap/wrk/:rw" \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap-baseline.py \
+  -t http://juice-shop:3000 \
+  -j \
+  -m 1 \
+  -r zap-baseline-report.html \
+  -J zap-baseline-report.json
+```
+
+The `-j` option enables the modern spider in addition to the traditional spider, helping discovery in JavaScript-heavy applications.
+
+The scan generates both HTML and JSON reports.
+
+---
+
+# Baseline Scan Workflow
+
+```text
+Target
+  |
+  v
+Spider
+  |
+  v
+Discover URLs
+  |
+  v
+HTTP Traffic
+  |
+  v
+Passive Scanner
+  |
+  v
+Security Alerts
+```
+
+The passive scanner analyzes the HTTP traffic generated during discovery.
+
+It does not need access to application source code.
+
+---
+
+# 8. Inspect Generated Reports
+
+List the generated files:
+
+```bash
+ls -lh
+```
+
+Expected report files include:
+
+```text
+zap-baseline-report.html
+zap-baseline-report.json
+```
+
+Pretty-print the JSON report:
+
+```bash
+python3 -m json.tool zap-baseline-report.json | less
+```
+
+Quickly inspect important alert fields:
+
+```bash
+grep -Ei \
+  '"alert"|"riskdesc"|"confidence"|"url"' \
+  zap-baseline-report.json | head -n 80
+```
+
+On a desktop Ubuntu environment, open the HTML report with:
+
+```bash
+xdg-open zap-baseline-report.html
+```
+
+---
+
+# Understanding a ZAP Finding
+
+Important fields can include:
+
+```text
+Alert
+Risk
+Confidence
+URL
+Parameter
+Evidence
+Description
+Solution
+```
+
+Conceptually:
+
+```text
+Alert
+  |
+  +--> What security issue was detected?
+
+
+Risk
+  |
+  +--> How serious is it?
+
+
+Confidence
+  |
+  +--> How confident is ZAP?
+
+
+URL
+  |
+  +--> Where was it detected?
+
+
+Parameter
+  |
+  +--> Which input was involved?
+
+
+Evidence
+  |
+  +--> What triggered the alert?
+
+
+Solution
+  |
+  +--> How should it be remediated?
+```
+
+---
+
+# 9. Inspect the Baseline Exit Code
+
+Immediately after running the scan:
+
+```bash
+echo $?
+```
+
+The ZAP Baseline script defines the following exit values:
+
+```text
+0 -> Success
+
+1 -> At least one rule marked FAIL was triggered
+
+2 -> At least one WARN and no FAIL rules
+
+3 -> Scanner or execution failure
+```
+
+By default, Baseline alerts are treated as warnings unless policy configuration changes them to `FAIL` or `IGNORE`.
+
+A result such as:
+
+```text
+2
+```
+
+does not mean ZAP crashed.
+
+It means the scan ran and reported warning-level policy results.
+
+---
+
+# Scanner Status vs Security Status
+
+A DevSecOps pipeline must distinguish between scanner failures and security findings.
+
+```text
+Exit 3
+   |
+   v
+Execution Problem
+```
+
+versus:
+
+```text
+Exit 2
+   |
+   v
+Scan Completed
+   |
+   v
+Security Warnings Found
+```
+
+Understanding tool-specific exit-code semantics is necessary before integrating scanners into CI/CD.
+
+---
+
+# 10. Demonstrate an Allow-Warnings Policy
+
+Run:
+
+```bash
+docker run --rm \
+  --network zapnet \
+  -v "$PWD:/zap/wrk/:rw" \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap-baseline.py \
+  -t http://juice-shop:3000 \
+  -j \
+  -m 1 \
+  -I \
+  -r zap-policy-report.html \
+  -J zap-policy-report.json
+```
+
+Inspect the exit code:
+
+```bash
+echo $?
+```
+
+The `-I` option prevents warning-only results from causing a failure exit status.
+
+This demonstrates the separation between:
+
+```text
+Security Detection
+       |
+       v
+Security Policy
+       |
+   +---+---+
+   |       |
+Report   Block
+```
+
+Security scanners identify findings.
+
+Security policy determines which findings block delivery.
+
+---
+
+# 11. Run a Controlled Active Scan
+
+> **Authorization Warning**
+>
+> Active security scanning must only be performed against systems you own or have explicit authorization to test.
+>
+> This lab uses OWASP Juice Shop, an intentionally vulnerable local training target.
+
+Run the ZAP Full Scan:
+
+```bash
+docker run --rm \
+  --network zapnet \
+  -v "$PWD:/zap/wrk/:rw" \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap-full-scan.py \
+  -t http://juice-shop:3000 \
+  -m 2 \
+  -r zap-full-report.html \
+  -J zap-full-report.json
+```
+
+The ZAP Full Scan performs both passive and active security testing. ZAP explicitly documents that the Full Scan sends real attack traffic to the configured target.
+
+---
+
+# Baseline vs Full Scan
+
+```text
+                 Baseline        Full
+
+Spider              YES           YES
+
+Passive Scan        YES           YES
+
+Active Scan          NO           YES
+```
+
+Passive scanning analyzes traffic that has already occurred.
+
+```text
+HTTP Request
+      |
+      v
+HTTP Response
+      |
+      v
+Passive Analysis
+```
+
+Active scanning sends additional test requests to determine how the application behaves.
+
+```text
+ZAP
+ |
+ v
+Security Test Request
+ |
+ v
+Application
+ |
+ v
+Response
+ |
+ v
+Analysis
+```
+
+---
+
+# 12. Inspect the Full Scan Report
+
+List the reports:
+
+```bash
+ls -lh zap-full-report.*
+```
+
+Inspect the JSON:
+
+```bash
+python3 -m json.tool zap-full-report.json | less
+```
+
+Quickly inspect security alerts:
+
+```bash
+grep -Ei \
+  '"alert"|"riskdesc"|"confidence"|"url"' \
+  zap-full-report.json | head -n 100
+```
+
+On a desktop environment:
+
+```bash
+xdg-open zap-full-report.html
+```
+
+---
+
+# DAST Coverage
+
+DAST only analyzes application functionality that the scanner can reach.
+
+Consider:
+
+```text
+Application
+│
+├── /
+│
+├── /login
+│
+├── /products
+│
+├── /api/products
+│
+└── /admin/internal
+```
+
+If ZAP discovers only:
+
+```text
+/
+/login
+/products
+/api/products
+```
+
+then:
+
+```text
+/admin/internal
+```
+
+may not be tested.
+
+This creates a **coverage gap**.
+
+---
+
+# Common Causes of DAST Coverage Gaps
+
+Examples include:
+
+```text
+Authentication
+       |
+       v
+Protected Routes
+
+
+JavaScript Navigation
+       |
+       v
+Undiscovered Routes
+
+
+API Endpoints
+       |
+       v
+No UI Links
+
+
+Role-Based Access
+       |
+       v
+Admin-only Functionality
+```
+
+More advanced DAST programs therefore use capabilities such as:
+
+```text
+Authentication
+
+Contexts
+
+API specifications
+
+Modern spiders
+
+Multiple test users
+
+Role-specific scanning
+```
+
+---
+
+# DAST in the DevSecOps Pipeline
+
+The pipeline now looks like:
+
+```text
+Developer
+    |
+    v
+Source Code
+    |
+    v
+Gitleaks
+Secrets Scan
+    |
+    v
+Semgrep
+SAST
+    |
+    v
+Trivy Filesystem
+SCA
+    |
+    v
+Docker Build
+    |
+    v
+Trivy Image
+Container Security
+    |
+    v
+Run Test Environment
+    |
+    v
+OWASP ZAP
+DAST
+    |
+ +--+--+
+ |     |
+Pass  Fail
+ |     |
+ v     X
+Release
+```
+
+---
+
+# Cleanup
+
+Stop Juice Shop:
+
+```bash
+docker stop juice-shop
+```
+
+Because the container was started using `--rm`, Docker removes it after it stops.
+
+Remove the test network:
+
+```bash
+docker network rm zapnet
+```
+
+Verify the remaining containers:
+
+```bash
+docker ps -a
+```
+
+The ZAP reports remain in the lab directory.
+
+---
+
+# Complete Lab Command Reference
+
+```bash
+# ============================================================
+# DevSecOps Lab 05 - DAST with OWASP ZAP
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 1. Create Lab Environment
+# ------------------------------------------------------------
+
+mkdir -p ~/devsecops-labs/05-dast-zap
+
+cd ~/devsecops-labs/05-dast-zap
+
+pwd
+
+
+# ------------------------------------------------------------
+# 2. Create Docker Network
+# ------------------------------------------------------------
+
+docker network inspect zapnet >/dev/null 2>&1 || \
+docker network create zapnet
+
+docker network ls
+
+
+# ------------------------------------------------------------
+# 3. Download OWASP Juice Shop
+# ------------------------------------------------------------
+
+docker pull bkimminich/juice-shop
+
+
+# ------------------------------------------------------------
+# 4. Start OWASP Juice Shop
+# ------------------------------------------------------------
+
+docker run -d \
+  --rm \
+  --name juice-shop \
+  --network zapnet \
+  -p 3000:3000 \
+  bkimminich/juice-shop
+
+
+# ------------------------------------------------------------
+# 5. Verify Target Container
+# ------------------------------------------------------------
+
+docker ps
+
+docker logs --tail 20 juice-shop
+
+
+# ------------------------------------------------------------
+# 6. Verify Web Application
+# ------------------------------------------------------------
+
+curl -I http://localhost:3000
+
+
+# ------------------------------------------------------------
+# 7. Download OWASP ZAP
+# ------------------------------------------------------------
+
+docker pull ghcr.io/zaproxy/zaproxy:stable
+
+
+# ------------------------------------------------------------
+# 8. Verify ZAP
+# ------------------------------------------------------------
+
+docker run --rm \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap.sh -version
+
+
+# ------------------------------------------------------------
+# 9. Run Baseline DAST Scan
+# ------------------------------------------------------------
+
+docker run --rm \
+  --network zapnet \
+  -v "$PWD:/zap/wrk/:rw" \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap-baseline.py \
+  -t http://juice-shop:3000 \
+  -j \
+  -m 1 \
+  -r zap-baseline-report.html \
+  -J zap-baseline-report.json
+
+
+# ------------------------------------------------------------
+# 10. Inspect Baseline Exit Code
+# ------------------------------------------------------------
+
+echo $?
+
+
+# ------------------------------------------------------------
+# 11. List ZAP Reports
+# ------------------------------------------------------------
+
+ls -lh
+
+
+# ------------------------------------------------------------
+# 12. Inspect Baseline JSON Report
+# ------------------------------------------------------------
+
+python3 -m json.tool \
+  zap-baseline-report.json | less
+
+
+# ------------------------------------------------------------
+# 13. Extract Important Alert Fields
+# ------------------------------------------------------------
+
+grep -Ei \
+  '"alert"|"riskdesc"|"confidence"|"url"' \
+  zap-baseline-report.json | head -n 80
+
+
+# ------------------------------------------------------------
+# 14. Optional - Open HTML Report on Desktop Ubuntu
+# ------------------------------------------------------------
+
+xdg-open zap-baseline-report.html
+
+
+# ------------------------------------------------------------
+# 15. Run Baseline with Allow-Warnings Policy
+# ------------------------------------------------------------
+
+docker run --rm \
+  --network zapnet \
+  -v "$PWD:/zap/wrk/:rw" \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap-baseline.py \
+  -t http://juice-shop:3000 \
+  -j \
+  -m 1 \
+  -I \
+  -r zap-policy-report.html \
+  -J zap-policy-report.json
+
+
+# ------------------------------------------------------------
+# 16. Inspect Policy Exit Code
+# ------------------------------------------------------------
+
+echo $?
+
+
+# ------------------------------------------------------------
+# 17. Run Authorized Active DAST Scan
+# ------------------------------------------------------------
+
+docker run --rm \
+  --network zapnet \
+  -v "$PWD:/zap/wrk/:rw" \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap-full-scan.py \
+  -t http://juice-shop:3000 \
+  -m 2 \
+  -r zap-full-report.html \
+  -J zap-full-report.json
+
+
+# ------------------------------------------------------------
+# 18. Inspect Full Scan Exit Code
+# ------------------------------------------------------------
+
+echo $?
+
+
+# ------------------------------------------------------------
+# 19. List Full Scan Reports
+# ------------------------------------------------------------
+
+ls -lh zap-full-report.*
+
+
+# ------------------------------------------------------------
+# 20. Inspect Full Scan JSON
+# ------------------------------------------------------------
+
+python3 -m json.tool \
+  zap-full-report.json | less
+
+
+# ------------------------------------------------------------
+# 21. Extract Full Scan Alerts
+# ------------------------------------------------------------
+
+grep -Ei \
+  '"alert"|"riskdesc"|"confidence"|"url"' \
+  zap-full-report.json | head -n 100
+
+
+# ------------------------------------------------------------
+# 22. Optional - Open Full HTML Report
+# ------------------------------------------------------------
+
+xdg-open zap-full-report.html
+
+
+# ------------------------------------------------------------
+# 23. Stop Test Application
+# ------------------------------------------------------------
+
+docker stop juice-shop
+
+
+# ------------------------------------------------------------
+# 24. Remove Docker Test Network
+# ------------------------------------------------------------
+
+docker network rm zapnet
+
+
+# ------------------------------------------------------------
+# 25. Verify Cleanup
+# ------------------------------------------------------------
+
+docker ps -a
+```
+
+---
+
+# Key Concepts
+
+## DAST Requires a Running Target
+
+```text
+Application Stopped
+       |
+       X
+DAST Cannot Reach Target
+```
+
+versus:
+
+```text
+Application Running
+       |
+       v
+HTTP Interface
+       |
+       v
+DAST Scanner
+```
+
+---
+
+## Passive Scanning
+
+```text
+Existing HTTP Traffic
+       |
+       v
+Observe
+       |
+       v
+Analyze
+       |
+       v
+Findings
+```
+
+Passive scanning does not need to actively inject test payloads.
+
+---
+
+## Active Scanning
+
+```text
+ZAP
+ |
+ v
+Security Test Request
+ |
+ v
+Application
+ |
+ v
+Behavior
+ |
+ v
+Security Finding
+```
+
+Active scanning must only be performed against authorized targets.
+
+---
+
+## Scanner vs Policy
+
+A finding alone does not determine whether a deployment should fail.
+
+```text
+Scanner
+   |
+   v
+Finding
+   |
+   v
+Security Policy
+   |
+ +─+──────+
+ |        |
+Allow    Block
+```
+
+This distinction becomes especially important when integrating security tooling into CI/CD.
+
+---
+
+## DAST Coverage Matters
+
+A scanner cannot effectively test application functionality it cannot reach.
+
+```text
+Application Attack Surface
+           |
+           v
+     Scanner Coverage
+           |
+     +-----+-----+
+     |           |
+Discovered   Undiscovered
+     |           |
+     v           v
+  Tested      Not Tested
+```
+
+Authentication and application discovery are therefore major parts of mature DAST programs.
+
+---
+
+# Lab Summary
+
+In this lab, you:
+
+1. Created a dedicated Docker security-testing network.
+2. Started OWASP Juice Shop as an intentionally vulnerable local target.
+3. Installed OWASP ZAP using Docker.
+4. Performed a Baseline DAST scan.
+5. Used traditional and modern application discovery.
+6. Generated HTML and JSON reports.
+7. Interpreted ZAP findings.
+8. Learned ZAP Baseline exit-code semantics.
+9. Applied an allow-warnings policy.
+10. Performed an authorized Active Scan against the local training application.
+11. Compared passive and active scanning.
+12. Learned why DAST coverage matters.
+13. Cleaned up the local testing environment.
+
+The complete security workflow now covers:
+
+```text
+Secrets
+   |
+   v
+Gitleaks
+
+Source Code
+   |
+   v
+Semgrep
+
+Dependencies
+   |
+   v
+Trivy SCA
+
+Container Image
+   |
+   v
+Trivy Image
+
+Running Application
+   |
+   v
+OWASP ZAP
+```
+
+The final stage is to combine these controls into an automated **CI/CD DevSecOps pipeline**.
