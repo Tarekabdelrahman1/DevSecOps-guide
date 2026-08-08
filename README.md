@@ -2255,3 +2255,245 @@ This adds the third major security control to the DevSecOps pipeline:
 ```text
 Secrets Detection → SAST → SCA
 ```
+
+# DevSecOps Lab 04 — Container Security with Docker and Trivy
+
+## Objective
+
+This lab demonstrates how to assess and improve the security of a Docker container image using **Trivy**.
+
+The lab covers two different container-security concerns:
+
+1. Known vulnerabilities inside the final container image.
+2. Dockerfile security misconfigurations.
+
+By the end of this lab, you will be able to:
+
+* Build an intentionally insecure container image.
+* Scan local Docker images with Trivy.
+* Identify OS and application dependency vulnerabilities.
+* Filter findings by severity.
+* Create a vulnerability security gate using exit codes.
+* Scan a Dockerfile for misconfigurations.
+* Identify containers that run as root.
+* Upgrade application dependencies.
+* Use a non-root runtime user.
+* Rebuild and re-scan a hardened image.
+
+---
+
+## Architecture
+
+```text
+Source Code
+    |
+    v
+Dependencies
+    |
+    v
+Docker Build
+    |
+    v
+Container Image
+    |
+    +---------> Trivy Vulnerability Scan
+    |
+    +---------> Dockerfile Misconfiguration Scan
+    |
+    v
+Security Gate
+```
+
+---
+
+## Lab Files
+
+```text
+04-container-security/
+├── app.py
+├── requirements.txt
+└── Dockerfile
+```
+
+---
+
+## Vulnerable Image
+
+The first image intentionally contains:
+
+* An outdated Python dependency.
+* An older Python base image.
+* No explicit non-root `USER`.
+
+This allows us to demonstrate both vulnerability scanning and container hardening.
+
+---
+
+## Remediation Strategy
+
+The hardened image will:
+
+* Upgrade the vulnerable dependency.
+* Use a newer base image.
+* Create a dedicated application user.
+* Run the application as a non-root user.
+
+Docker recommends trusted, minimal base images and the use of a non-root `USER` when elevated privileges are not required.
+
+---
+
+## Vulnerability Scanning
+
+Trivy supports scanning container images using:
+
+```bash
+trivy image IMAGE
+```
+
+It supports severity filtering, ignoring vulnerabilities without fixes, and configuring a non-zero exit code when matching security findings exist.
+
+A typical security-gate workflow is:
+
+```text
+Docker Build
+     |
+     v
+Trivy Image Scan
+     |
+     v
+HIGH / CRITICAL?
+   /       \
+ No         Yes
+ |           |
+PASS        FAIL
+```
+
+---
+
+## Misconfiguration Scanning
+
+Container security also includes configuration issues that are not necessarily package CVEs.
+
+For example, a Dockerfile without a non-root `USER` may cause the application to execute as root.
+
+Trivy can scan Dockerfiles and other Infrastructure-as-Code configurations using:
+
+```bash
+trivy config
+```
+
+---
+
+# Complete Lab Command Reference
+
+```bash
+# ============================================================
+# DevSecOps Lab 04 - Container Security with Docker and Trivy
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 1. Create Lab Environment
+# ------------------------------------------------------------
+
+mkdir -p ~/devsecops-labs/04-container-security
+cd ~/devsecops-labs/04-container-security
+
+
+# ------------------------------------------------------------
+# 2. Create Application
+# ------------------------------------------------------------
+
+cat > app.py <<'EOF'
+import requests
+
+print("Container Security Lab")
+print("Requests version:", requests.__version__)
+EOF
+
+
+# ------------------------------------------------------------
+# 3. Create Vulnerable Dependency Manifest
+# ------------------------------------------------------------
+
+cat > requirements.txt <<'EOF'
+requests==2.25.0
+EOF
+
+
+# ------------------------------------------------------------
+# 4. Create Vulnerable Dockerfile
+# ------------------------------------------------------------
+
+cat > Dockerfile <<'EOF'
+FROM python:3.9.18-slim-bullseye
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+CMD ["python", "app.py"]
+EOF
+
+
+# ------------------------------------------------------------
+# 5. Inspect Lab Files
+# ------------------------------------------------------------
+
+cat app.py
+cat requirements.txt
+cat Dockerfile
+
+
+# ------------------------------------------------------------
+# 6. Build Vulnerable Image
+# ------------------------------------------------------------
+
+docker build \
+  -t devsecops/container-lab:vulnerable \
+  .
+
+
+# ------------------------------------------------------------
+# 7. Inspect Local Image
+# ------------------------------------------------------------
+
+docker images devsecops/container-lab
+
+
+# ------------------------------------------------------------
+# 8. Run Vulnerable Container
+# ------------------------------------------------------------
+
+docker run --rm \
+  devsecops/container-lab:vulnerable
+
+
+# ------------------------------------------------------------
+# 9. Check Runtime User
+# ------------------------------------------------------------
+
+docker run --rm \
+  devsecops/container-lab:vulnerable \
+  id
+
+
+# ------------------------------------------------------------
+# 10. Scan Container Image for Vulnerabilities
+# ------------------------------------------------------------
+
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$HOME/.cache/trivy:/root/.cache/" \
+  aquasec/trivy:latest \
+  image \
+  --scanners vuln \
+  devsecops/container-lab:vulnerable
+
+
+#
+```
