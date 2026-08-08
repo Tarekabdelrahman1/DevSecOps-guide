@@ -4561,3 +4561,938 @@ OWASP ZAP
 ```
 
 The final stage is to combine these controls into an automated **CI/CD DevSecOps pipeline**.
+
+# DevSecOps Lab 06 — Local CI/CD Security Pipeline
+
+## Objective
+
+This lab integrates the security controls introduced throughout the DevSecOps learning path into a single automated local pipeline.
+
+The pipeline performs:
+
+* Secrets Detection with Gitleaks
+* Static Application Security Testing with Semgrep
+* Software Composition Analysis with Trivy
+* Docker Image Build
+* Container Vulnerability Scanning with Trivy
+* Test Environment Deployment
+* Dynamic Application Security Testing with OWASP ZAP
+
+The pipeline uses security-tool exit codes to enforce automated security gates.
+
+---
+
+## Pipeline Architecture
+
+```text
+Git Repository
+      |
+      v
+Gitleaks
+Secrets Detection
+      |
+      v
+Semgrep
+SAST
+      |
+      v
+Trivy Filesystem
+SCA
+      |
+      v
+Docker Build
+      |
+      v
+Trivy Image
+Container Security
+      |
+      v
+Test Deployment
+      |
+      v
+OWASP ZAP
+DAST
+      |
+   +--+--+
+   |     |
+ PASS   FAIL
+   |     |
+   v     X
+Release Block
+```
+
+---
+
+## Tools
+
+* Ubuntu
+* Bash
+* Git
+* Docker
+* Gitleaks
+* Semgrep
+* Trivy
+* OWASP ZAP
+* Python
+* Flask
+
+---
+
+## Project Structure
+
+```text
+06-cicd-integration/
+├── app.py
+├── requirements.txt
+├── Dockerfile
+├── .dockerignore
+├── .gitignore
+├── semgrep-rules.yml
+├── zap-rules.conf
+├── pipeline.sh
+└── reports/
+```
+
+---
+
+# Application
+
+The application exposes two endpoints:
+
+```text
+/
+```
+
+and:
+
+```text
+/health
+```
+
+The `/health` endpoint is used by the pipeline to verify that the temporary test deployment is ready before DAST begins.
+
+The application also sets basic HTTP security headers including:
+
+```text
+X-Content-Type-Options
+X-Frame-Options
+Content-Security-Policy
+Cache-Control
+```
+
+---
+
+# Security Stages
+
+## Stage 1 — Secrets Detection
+
+Gitleaks scans the Git repository before any build operation occurs.
+
+```text
+Git History
+     |
+     v
+Gitleaks
+     |
+  +--+--+
+  |     |
+Clean Secret
+  |     |
+  v     v
+PASS   FAIL
+```
+
+The pipeline stops immediately when the secrets gate fails.
+
+---
+
+## Stage 2 — SAST
+
+Semgrep analyzes application source code using a custom security rule.
+
+The lab rule detects:
+
+```python
+os.system(...)
+```
+
+The scan runs with:
+
+```text
+--error
+```
+
+so findings are converted into a non-zero exit code and become a CI/CD security gate.
+
+---
+
+## Stage 3 — Software Composition Analysis
+
+Trivy scans the project dependencies before the container image is built.
+
+The policy used in this lab blocks:
+
+```text
+HIGH
+CRITICAL
+```
+
+vulnerabilities that have available fixes.
+
+Conceptually:
+
+```text
+requirements.txt
+       |
+       v
+     Trivy
+       |
+       v
+Known Vulnerabilities
+       |
+   +---+---+
+   |       |
+Allowed  Blocked
+```
+
+---
+
+## Stage 4 — Container Build
+
+If the source-code security stages pass, the application is built into a Docker image:
+
+```text
+devsecops-pipeline:local
+```
+
+The image runs the application as a dedicated non-root user.
+
+---
+
+## Stage 5 — Container Security
+
+Trivy scans the final Docker image.
+
+This stage analyzes the actual artifact that would eventually be published or deployed.
+
+```text
+Docker Image
+     |
+     +--> OS Packages
+     |
+     +--> Application Libraries
+     |
+     v
+   Trivy
+```
+
+`HIGH` and `CRITICAL` vulnerabilities matching the configured policy block the pipeline.
+
+---
+
+## Stage 6 — Test Deployment
+
+The image is started inside an isolated Docker network.
+
+The pipeline performs a health check against:
+
+```text
+http://localhost:8080/health
+```
+
+The pipeline waits until the application becomes reachable or fails if the application never becomes healthy.
+
+---
+
+## Stage 7 — DAST
+
+OWASP ZAP performs a Baseline Scan against the running test application.
+
+The pipeline defines explicit DAST policy rules for:
+
+```text
+X-Frame-Options
+X-Content-Type-Options
+```
+
+These alerts are configured as blocking findings.
+
+Other warning-level findings are reported but do not automatically block this lab pipeline.
+
+---
+
+# Fail-Fast Behavior
+
+The pipeline begins with:
+
+```bash
+set -Eeuo pipefail
+```
+
+As a result, a failing security gate prevents later delivery stages from running.
+
+For example:
+
+```text
+Gitleaks
+   |
+ PASS
+   |
+Semgrep
+   |
+ FAIL
+   |
+   X
+```
+
+The pipeline does not proceed to:
+
+```text
+SCA
+Docker Build
+Container Scan
+DAST
+```
+
+This implements a fail-fast DevSecOps workflow.
+
+---
+
+# Security Policy vs Security Scanner
+
+A scanner identifies security findings.
+
+A security policy determines what happens to those findings.
+
+```text
+Scanner
+   |
+   v
+Finding
+   |
+   v
+Policy
+   |
+ +─+──────+
+ |        |
+Allow    Block
+```
+
+Examples from this lab include:
+
+```text
+Trivy HIGH/CRITICAL
+        |
+        v
+      BLOCK
+```
+
+and:
+
+```text
+ZAP normal warning
+        |
+        v
+      REPORT
+```
+
+A mature DevSecOps implementation should define these policies explicitly rather than treating every security finding identically.
+
+---
+
+# Running the Pipeline
+
+Make the script executable:
+
+```bash
+chmod +x pipeline.sh
+```
+
+Run:
+
+```bash
+./pipeline.sh
+```
+
+A successful execution ends with:
+
+```text
+============================================================
+ DEVSECOPS PIPELINE PASSED
+============================================================
+```
+
+---
+
+# Testing the SAST Security Gate
+
+Back up the safe application:
+
+```bash
+cp app.py app.py.safe
+```
+
+Introduce an intentionally insecure API:
+
+```bash
+sed -i '1i import os' app.py
+```
+
+```bash
+sed -i '/def index():/a\    os.system("echo unsafe-test")' app.py
+```
+
+Verify:
+
+```bash
+grep -n "os.system" app.py
+```
+
+Run the pipeline:
+
+```bash
+./pipeline.sh
+```
+
+The expected flow is:
+
+```text
+Gitleaks
+   |
+ PASS
+   |
+Semgrep
+   |
+Finding
+   |
+ FAIL
+```
+
+The Docker build should not execute.
+
+Restore the secure application:
+
+```bash
+mv app.py.safe app.py
+```
+
+Re-run:
+
+```bash
+./pipeline.sh
+```
+
+---
+
+# Complete Command Reference
+
+```bash
+# ============================================================
+# DevSecOps Lab 06 - Local CI/CD Security Pipeline
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 1. Create Lab Environment
+# ------------------------------------------------------------
+
+mkdir -p ~/devsecops-labs/06-cicd-integration
+
+cd ~/devsecops-labs/06-cicd-integration
+
+mkdir -p reports
+
+
+# ------------------------------------------------------------
+# 2. Create Dependency Manifest
+# ------------------------------------------------------------
+
+cat > requirements.txt <<'EOF'
+Flask==3.1.3
+EOF
+
+
+# ------------------------------------------------------------
+# 3. Create Application
+# ------------------------------------------------------------
+
+cat > app.py <<'EOF'
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/")
+def index():
+    return jsonify(
+        application="DevSecOps CI/CD Lab",
+        status="running"
+    )
+
+
+@app.route("/health")
+def health():
+    return jsonify(status="healthy"), 200
+
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=8080,
+        debug=False
+    )
+EOF
+
+
+# ------------------------------------------------------------
+# 4. Create Semgrep Rule
+# ------------------------------------------------------------
+
+cat > semgrep-rules.yml <<'EOF'
+rules:
+  - id: lab.python.dangerous-os-system
+    message: Avoid os.system(); passing untrusted data may lead to command injection.
+    severity: ERROR
+    languages:
+      - python
+    pattern: os.system(...)
+EOF
+
+
+# ------------------------------------------------------------
+# 5. Create Dockerfile
+# ------------------------------------------------------------
+
+cat > Dockerfile <<'EOF'
+FROM python:3.13-slim-bookworm
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+RUN useradd \
+    --create-home \
+    --uid 10001 \
+    --shell /usr/sbin/nologin \
+    appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
+EXPOSE 8080
+
+CMD ["python", "app.py"]
+EOF
+
+
+# ------------------------------------------------------------
+# 6. Create .dockerignore
+# ------------------------------------------------------------
+
+cat > .dockerignore <<'EOF'
+.git
+.gitignore
+reports
+*.env
+.env
+__pycache__
+*.pyc
+README.md
+pipeline.sh
+semgrep-rules.yml
+zap-rules.conf
+EOF
+
+
+# ------------------------------------------------------------
+# 7. Create .gitignore
+# ------------------------------------------------------------
+
+cat > .gitignore <<'EOF'
+reports/
+.env
+*.env
+__pycache__/
+*.pyc
+EOF
+
+
+# ------------------------------------------------------------
+# 8. Create ZAP Policy
+# ------------------------------------------------------------
+
+cat > zap-rules.conf <<'EOF'
+10020	FAIL	(X-Frame-Options Header Scanner)
+10021	FAIL	(X-Content-Type-Options Header Missing)
+EOF
+
+
+# ------------------------------------------------------------
+# 9. Initialize Git Repository
+# ------------------------------------------------------------
+
+git init
+
+git config user.name "DevSecOps Lab"
+
+git config user.email "devsecops-lab@example.local"
+
+git add .
+
+git commit -m "Initial secure DevSecOps application"
+
+git status
+
+
+# ------------------------------------------------------------
+# 10. Create Pipeline
+# ------------------------------------------------------------
+
+cat > pipeline.sh <<'EOF'
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+IMAGE_NAME="devsecops-pipeline:local"
+CONTAINER_NAME="devsecops-pipeline-app"
+NETWORK_NAME="devsecops-pipeline-net"
+TRIVY_CACHE="${HOME}/.cache/trivy"
+
+mkdir -p reports
+mkdir -p "$TRIVY_CACHE"
+
+
+stage() {
+    echo
+    echo "============================================================"
+    echo " $1"
+    echo "============================================================"
+}
+
+
+cleanup() {
+    echo
+    echo "[CLEANUP] Removing test resources..."
+
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT
+
+
+stage "STAGE 1/7 - Secrets Scan: Gitleaks"
+
+docker run --rm \
+    -v "$PWD:/repo" \
+    -w /repo \
+    ghcr.io/gitleaks/gitleaks:latest \
+    git \
+    --redact
+
+
+stage "STAGE 2/7 - SAST: Semgrep"
+
+docker run --rm \
+    -v "$PWD:/src" \
+    semgrep/semgrep:latest \
+    semgrep scan \
+    --error \
+    --config /src/semgrep-rules.yml \
+    /src/app.py
+
+
+stage "STAGE 3/7 - SCA: Trivy Filesystem"
+
+docker run --rm \
+    -v "$PWD:/src:ro" \
+    -v "$TRIVY_CACHE:/root/.cache/" \
+    aquasec/trivy:latest \
+    fs \
+    --scanners vuln \
+    --severity HIGH,CRITICAL \
+    --ignore-unfixed \
+    --exit-code 1 \
+    /src
+
+
+stage "STAGE 4/7 - Build Container Image"
+
+docker build \
+    -t "$IMAGE_NAME" \
+    .
+
+
+stage "STAGE 5/7 - Container Security: Trivy Image"
+
+docker run --rm \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "$TRIVY_CACHE:/root/.cache/" \
+    aquasec/trivy:latest \
+    image \
+    --scanners vuln \
+    --severity HIGH,CRITICAL \
+    --ignore-unfixed \
+    --exit-code 1 \
+    "$IMAGE_NAME"
+
+
+stage "STAGE 6/7 - Deploy Test Application"
+
+docker network create "$NETWORK_NAME" >/dev/null
+
+docker run -d \
+    --name "$CONTAINER_NAME" \
+    --network "$NETWORK_NAME" \
+    -p 8080:8080 \
+    "$IMAGE_NAME" >/dev/null
+
+
+echo "Waiting for application health check..."
+
+APP_READY=0
+
+for attempt in $(seq 1 20); do
+
+    if curl --silent --fail \
+        http://localhost:8080/health >/dev/null; then
+
+        APP_READY=1
+        break
+    fi
+
+    sleep 1
+done
+
+
+if [ "$APP_READY" -ne 1 ]; then
+    echo "Application failed health check."
+    docker logs "$CONTAINER_NAME"
+    exit 1
+fi
+
+echo "Application is healthy."
+
+
+stage "STAGE 7/7 - DAST: OWASP ZAP"
+
+docker run --rm \
+    --network "$NETWORK_NAME" \
+    -v "$PWD:/zap/wrk/:rw" \
+    ghcr.io/zaproxy/zaproxy:stable \
+    zap-baseline.py \
+    -t "http://${CONTAINER_NAME}:8080" \
+    -m 1 \
+    -I \
+    -c zap-rules.conf \
+    -r reports/zap-report.html \
+    -J reports/zap-report.json
+
+
+echo
+echo "============================================================"
+echo " DEVSECOPS PIPELINE PASSED"
+echo "============================================================"
+EOF
+
+
+# ------------------------------------------------------------
+# 11. Make Pipeline Executable
+# ------------------------------------------------------------
+
+chmod +x pipeline.sh
+
+
+# ------------------------------------------------------------
+# 12. Download Required Images
+# ------------------------------------------------------------
+
+docker pull ghcr.io/gitleaks/gitleaks:latest
+
+docker pull semgrep/semgrep:latest
+
+docker pull aquasec/trivy:latest
+
+docker pull ghcr.io/zaproxy/zaproxy:stable
+
+docker pull python:3.13-slim-bookworm
+
+
+# ------------------------------------------------------------
+# 13. Run Complete DevSecOps Pipeline
+# ------------------------------------------------------------
+
+./pipeline.sh
+
+
+# ------------------------------------------------------------
+# 14. Inspect DAST Reports
+# ------------------------------------------------------------
+
+ls -lh reports/
+
+python3 -m json.tool \
+    reports/zap-report.json | less
+
+
+# ------------------------------------------------------------
+# 15. Optional - Open HTML Report
+# ------------------------------------------------------------
+
+xdg-open reports/zap-report.html
+
+
+# ------------------------------------------------------------
+# 16. Intentionally Break SAST Gate
+# ------------------------------------------------------------
+
+cp app.py app.py.safe
+
+sed -i '1i import os' app.py
+
+sed -i '/def index():/a\    os.system("echo unsafe-test")' app.py
+
+grep -n "os.system" app.py
+
+
+# ------------------------------------------------------------
+# 17. Verify Pipeline Blocks Vulnerable Code
+# ------------------------------------------------------------
+
+./pipeline.sh
+
+
+# ------------------------------------------------------------
+# 18. Restore Secure Application
+# ------------------------------------------------------------
+
+mv app.py.safe app.py
+
+
+# ------------------------------------------------------------
+# 19. Re-run Pipeline
+# ------------------------------------------------------------
+
+./pipeline.sh
+```
+
+---
+
+# Final DevSecOps Workflow
+
+The complete learning path now implements:
+
+```text
+                    SOFTWARE DELIVERY
+
+                          |
+                          v
+
+                    Source Code
+                          |
+                          v
+                    +-----------+
+                    | Gitleaks  |
+                    |  Secrets  |
+                    +-----+-----+
+                          |
+                          v
+                    +-----------+
+                    | Semgrep   |
+                    |   SAST    |
+                    +-----+-----+
+                          |
+                          v
+                    +-----------+
+                    |  Trivy    |
+                    |   SCA     |
+                    +-----+-----+
+                          |
+                          v
+                    +-----------+
+                    |  Docker   |
+                    |   Build   |
+                    +-----+-----+
+                          |
+                          v
+                    +-----------+
+                    |  Trivy    |
+                    | Container |
+                    +-----+-----+
+                          |
+                          v
+                    +-----------+
+                    | Test Env  |
+                    +-----+-----+
+                          |
+                          v
+                    +-----------+
+                    | OWASP ZAP |
+                    |   DAST    |
+                    +-----+-----+
+                          |
+                     +----+----+
+                     |         |
+                    PASS      FAIL
+                     |         |
+                     v         X
+                  Release    Block
+```
+
+---
+
+# Key Takeaway
+
+DevSecOps is not:
+
+```text
+DevOps + a collection of security scanners
+```
+
+A better model is:
+
+```text
+DevSecOps
+   =
+Security Controls
+   +
+Security Policies
+   +
+Automation
+   +
+Continuous Feedback
+```
+
+The fundamental workflow is:
+
+```text
+Detect
+  |
+  v
+Evaluate Policy
+  |
+  v
+Block or Allow
+  |
+  v
+Remediate
+  |
+  v
+Re-run
+```
+
+That is the foundation of a real DevSecOps delivery pipeline.
+
